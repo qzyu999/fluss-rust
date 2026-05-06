@@ -390,7 +390,9 @@ impl ColumnWriter {
                     .fields()
                     .iter()
                     .enumerate()
-                    .map(|(idx, _field)| create_boxed_builder(arrow_fields[idx].data_type(), capacity))
+                    .map(|(idx, _field)| {
+                        create_boxed_builder(arrow_fields[idx].data_type(), capacity)
+                    })
                     .collect::<Result<Vec<_>>>()?;
 
                 let struct_builder = StructBuilder::new(arrow_fields.clone(), field_builders);
@@ -746,12 +748,7 @@ impl ColumnWriter {
             } => {
                 // Row is stored as FlussArray in CompactedRow format
                 let row_array = row.get_array(pos)?;
-                write_fluss_array_to_struct_builder(
-                    &row_array,
-                    fields,
-                    arrow_fields,
-                    builder,
-                )?;
+                write_fluss_array_to_struct_builder(&row_array, fields, arrow_fields, builder)?;
                 Ok(())
             }
         }
@@ -774,16 +771,15 @@ fn create_list_builder(
         ArrowDataType::Int64 => Box::new(Int64Builder::with_capacity(capacity)),
         ArrowDataType::Float32 => Box::new(Float32Builder::with_capacity(capacity)),
         ArrowDataType::Float64 => Box::new(Float64Builder::with_capacity(capacity)),
-        ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Box::new(StringBuilder::with_capacity(
-            capacity,
-            capacity * 64,
-        )),
-        ArrowDataType::Binary | ArrowDataType::LargeBinary => Box::new(
-            BinaryBuilder::with_capacity(capacity, capacity * 64),
-        ),
-        ArrowDataType::FixedSizeBinary(len) => Box::new(
-            FixedSizeBinaryBuilder::with_capacity(capacity, *len),
-        ),
+        ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => {
+            Box::new(StringBuilder::with_capacity(capacity, capacity * 64))
+        }
+        ArrowDataType::Binary | ArrowDataType::LargeBinary => {
+            Box::new(BinaryBuilder::with_capacity(capacity, capacity * 64))
+        }
+        ArrowDataType::FixedSizeBinary(len) => {
+            Box::new(FixedSizeBinaryBuilder::with_capacity(capacity, *len))
+        }
         ArrowDataType::Decimal128(p, s) => Box::new(
             Decimal128Builder::with_capacity(capacity)
                 .with_precision_and_scale(*p, *s)
@@ -860,9 +856,9 @@ fn create_builder_for_type(
         ArrowDataType::Binary | ArrowDataType::LargeBinary => Ok(Box::new(
             BinaryBuilder::with_capacity(capacity, capacity * 64),
         )),
-        ArrowDataType::FixedSizeBinary(len) => Ok(Box::new(
-            FixedSizeBinaryBuilder::with_capacity(capacity, *len),
-        )),
+        ArrowDataType::FixedSizeBinary(len) => Ok(Box::new(FixedSizeBinaryBuilder::with_capacity(
+            capacity, *len,
+        ))),
         ArrowDataType::Date32 => Ok(Box::new(Date32Builder::with_capacity(capacity))),
         _ => Err(Error::IllegalArgument {
             message: format!("Unsupported Arrow type for struct field: {arrow_type:?}"),
@@ -891,9 +887,9 @@ fn create_boxed_builder(
         ArrowDataType::Binary | ArrowDataType::LargeBinary => Ok(Box::new(
             BinaryBuilder::with_capacity(capacity, capacity * 64),
         )),
-        ArrowDataType::FixedSizeBinary(len) => Ok(Box::new(
-            FixedSizeBinaryBuilder::with_capacity(capacity, *len),
-        )),
+        ArrowDataType::FixedSizeBinary(len) => Ok(Box::new(FixedSizeBinaryBuilder::with_capacity(
+            capacity, *len,
+        ))),
         ArrowDataType::Decimal128(p, s) => Ok(Box::new(
             Decimal128Builder::with_capacity(capacity)
                 .with_precision_and_scale(*p, *s)
@@ -917,15 +913,15 @@ fn create_boxed_builder(
         ArrowDataType::Timestamp(arrow_schema::TimeUnit::Second, _) => {
             Ok(Box::new(TimestampSecondBuilder::with_capacity(capacity)))
         }
-        ArrowDataType::Timestamp(arrow_schema::TimeUnit::Millisecond, _) => {
-            Ok(Box::new(TimestampMillisecondBuilder::with_capacity(capacity)))
-        }
-        ArrowDataType::Timestamp(arrow_schema::TimeUnit::Microsecond, _) => {
-            Ok(Box::new(TimestampMicrosecondBuilder::with_capacity(capacity)))
-        }
-        ArrowDataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, _) => {
-            Ok(Box::new(TimestampNanosecondBuilder::with_capacity(capacity)))
-        }
+        ArrowDataType::Timestamp(arrow_schema::TimeUnit::Millisecond, _) => Ok(Box::new(
+            TimestampMillisecondBuilder::with_capacity(capacity),
+        )),
+        ArrowDataType::Timestamp(arrow_schema::TimeUnit::Microsecond, _) => Ok(Box::new(
+            TimestampMicrosecondBuilder::with_capacity(capacity),
+        )),
+        ArrowDataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, _) => Ok(Box::new(
+            TimestampNanosecondBuilder::with_capacity(capacity),
+        )),
         ArrowDataType::List(_) => Err(Error::IllegalArgument {
             message: "Nested List type should use create_list_builder".to_string(),
         }),
@@ -1053,7 +1049,9 @@ fn append_null_to_struct_field(
         DataType::Time(_) => try_append_null!(Int32Builder), // Time stored as millis
         DataType::Timestamp(_) => try_append_null!(TimestampMillisecondBuilder),
         DataType::TimestampLTz(_) => try_append_null!(TimestampMillisecondBuilder),
-        DataType::Array(_) | DataType::Row(_) => try_append_null!(ListBuilder<Box<dyn ArrayBuilder>>),
+        DataType::Array(_) | DataType::Row(_) => {
+            try_append_null!(ListBuilder<Box<dyn ArrayBuilder>>)
+        }
         DataType::Map(_) => {
             return Err(Error::IllegalArgument {
                 message: "Map type in struct not supported".to_string(),
@@ -1091,12 +1089,20 @@ fn write_field_to_struct_builder(
             if let Some(b) = struct_builder.field_builder::<Decimal128Builder>(idx) {
                 let decimal_type = match field_type {
                     DataType::Decimal(dt) => dt,
-                    _ => return Err(Error::IllegalArgument {
-                        message: "Expected Decimal type".to_string(),
-                    }),
+                    _ => {
+                        return Err(Error::IllegalArgument {
+                            message: "Expected Decimal type".to_string(),
+                        });
+                    }
                 };
-                let decimal = row_array.get_decimal(idx, decimal_type.precision(), decimal_type.scale())?;
-                append_decimal_to_builder(&decimal, decimal_type.precision() as u32, decimal_type.scale() as i64, b)?;
+                let decimal =
+                    row_array.get_decimal(idx, decimal_type.precision(), decimal_type.scale())?;
+                append_decimal_to_builder(
+                    &decimal,
+                    decimal_type.precision() as u32,
+                    decimal_type.scale() as i64,
+                    b,
+                )?;
                 return Ok(());
             }
         };
@@ -1143,12 +1149,19 @@ fn write_field_to_struct_builder(
     if let Some(b) = struct_builder.field_builder::<Decimal128Builder>(idx) {
         let decimal_type = match field_type {
             DataType::Decimal(dt) => dt,
-            _ => return Err(Error::IllegalArgument {
-                message: "Expected Decimal type".to_string(),
-            }),
+            _ => {
+                return Err(Error::IllegalArgument {
+                    message: "Expected Decimal type".to_string(),
+                });
+            }
         };
         let decimal = row_array.get_decimal(idx, decimal_type.precision(), decimal_type.scale())?;
-        append_decimal_to_builder(&decimal, decimal_type.precision() as u32, decimal_type.scale() as i64, b)?;
+        append_decimal_to_builder(
+            &decimal,
+            decimal_type.precision() as u32,
+            decimal_type.scale() as i64,
+            b,
+        )?;
         return Ok(());
     }
 
@@ -1166,7 +1179,10 @@ fn write_field_to_struct_builder(
     }
     if let Some(b) = struct_builder.field_builder::<TimestampMicrosecondBuilder>(idx) {
         let ts = row_array.get_timestamp_ntz(idx, 6)?;
-        b.append_value(millis_nanos_to_micros(ts.get_millisecond(), ts.get_nano_of_millisecond())?);
+        b.append_value(millis_nanos_to_micros(
+            ts.get_millisecond(),
+            ts.get_nano_of_millisecond(),
+        )?);
         return Ok(());
     }
 
@@ -1197,7 +1213,9 @@ fn write_field_to_struct_builder(
         _ => {
             // Other types should have been handled above
             return Err(Error::IllegalArgument {
-                message: format!("Failed to write field {idx} with type {field_type:?} - no matching builder found"),
+                message: format!(
+                    "Failed to write field {idx} with type {field_type:?} - no matching builder found"
+                ),
             });
         }
     }
@@ -1336,11 +1354,8 @@ impl crate::row::InternalRow for ArrayElementRow {
         scale: usize,
     ) -> Result<crate::row::Decimal> {
         if pos == 0 {
-            self.array.get_decimal(
-                self.index,
-                precision as u32,
-                scale as u32,
-            )
+            self.array
+                .get_decimal(self.index, precision as u32, scale as u32)
         } else {
             Err(Error::IllegalArgument {
                 message: format!("Array element row has only one field, got position {pos}"),
@@ -1654,15 +1669,16 @@ mod tests {
         // Nested array type: ARRAY<ARRAY<INT>>
         let inner_array = DataTypes::array(DataTypes::int());
         let fluss_type = DataTypes::array(inner_array);
-        let arrow_type = ArrowDataType::List(arrow_schema::FieldRef::new(
-            arrow_schema::Field::new(
+        let arrow_type =
+            ArrowDataType::List(arrow_schema::FieldRef::new(arrow_schema::Field::new(
                 "item",
-                ArrowDataType::List(arrow_schema::FieldRef::new(
-                    arrow_schema::Field::new("inner", ArrowDataType::Int32, true),
-                )),
+                ArrowDataType::List(arrow_schema::FieldRef::new(arrow_schema::Field::new(
+                    "inner",
+                    ArrowDataType::Int32,
+                    true,
+                ))),
                 true,
-            ),
-        ));
+            )));
         assert!(
             ColumnWriter::create(&fluss_type, &arrow_type, 0, 4).is_ok(),
             "Nested array type should be supported"
@@ -1691,16 +1707,14 @@ mod tests {
         // Map type is still not supported
         let map_type = DataTypes::map(DataTypes::string(), DataTypes::int());
         let map_arrow = ArrowDataType::Map(
-            arrow_schema::FieldRef::new(
-                arrow_schema::Field::new(
-                    "entries",
-                    ArrowDataType::Struct(arrow_schema::Fields::from(vec![
-                        arrow_schema::Field::new("key", ArrowDataType::Utf8, true),
-                        arrow_schema::Field::new("value", ArrowDataType::Int32, true),
-                    ])),
-                    true,
-                ),
-            ),
+            arrow_schema::FieldRef::new(arrow_schema::Field::new(
+                "entries",
+                ArrowDataType::Struct(arrow_schema::Fields::from(vec![
+                    arrow_schema::Field::new("key", ArrowDataType::Utf8, true),
+                    arrow_schema::Field::new("value", ArrowDataType::Int32, true),
+                ])),
+                true,
+            )),
             false,
         );
         assert!(
