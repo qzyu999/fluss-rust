@@ -122,7 +122,6 @@ enum TypedWriter {
     /// List/Array type with nested element writer.
     List {
         element_type: DataType,
-        arrow_element_type: ArrowDataType,
         element_writer: Box<ColumnWriter>,
         builder: ListBuilder<Box<dyn ArrayBuilder>>,
     },
@@ -367,7 +366,6 @@ impl ColumnWriter {
 
                 TypedWriter::List {
                     element_type: element_fluss_type,
-                    arrow_element_type: element_arrow_type,
                     element_writer: Box::new(element_writer),
                     builder: list_builder,
                 }
@@ -445,15 +443,25 @@ impl ColumnWriter {
     pub fn finish(&mut self) -> ArrayRef {
         match &mut self.inner {
             TypedWriter::List {
+                builder,
                 element_writer,
-                offsets,
-                validity,
+                ..
             } => {
                 let item_nullable = element_writer.nullable;
                 let values = element_writer.finish();
-                let taken_offsets = std::mem::replace(offsets, vec![0]);
-                let taken_validity = std::mem::take(validity);
-                finish_list_array(values, item_nullable, &taken_offsets, &taken_validity)
+                let list_arr = builder.finish();
+
+                let field = std::sync::Arc::new(arrow_schema::Field::new(
+                    "item",
+                    values.data_type().clone(),
+                    item_nullable,
+                ));
+                let offsets = list_arr.offsets().clone();
+                let nulls = arrow::array::Array::nulls(&list_arr).cloned();
+
+                std::sync::Arc::new(
+                    arrow::array::ListArray::try_new(field, offsets, values, nulls).unwrap(),
+                )
             }
             _ => with_builder!(&mut self.inner, b => (b as &mut dyn ArrayBuilder).finish()),
         }
@@ -524,27 +532,19 @@ impl ColumnWriter {
             }
             TypedWriter::List {
                 element_writer,
-                offsets,
-                validity,
+                builder,
+                ..
             } => {
-                let validity_bytes = round_up_to_8(validity.len().div_ceil(8));
-                let offsets_bytes = round_up_to_8(offsets.len() * std::mem::size_of::<i32>());
+                let validity_bytes = validity_size(builder.validity_slice());
+                let offsets_bytes = round_up_to_8(std::mem::size_of_val(builder.offsets_slice()));
                 validity_bytes + offsets_bytes + element_writer.buffer_size()
             }
+            TypedWriter::Struct { .. } => 0,
         }
     }
 
     fn append_null(&mut self) {
-        match &mut self.inner {
-            TypedWriter::List {
-                offsets, validity, ..
-            } => {
-                let last = *offsets.last().unwrap_or(&0);
-                offsets.push(last);
-                validity.push(false);
-            }
-            _ => with_builder!(&mut self.inner, b => b.append_null()),
-        }
+        with_builder!(&mut self.inner, b => b.append_null())
     }
 
     #[inline]
@@ -938,19 +938,19 @@ fn create_boxed_builder(
 /// This recursively writes each element using the appropriate ColumnWriter.
 fn write_fluss_array_to_list_builder(
     array: &crate::row::FlussArray,
-    element_type: &DataType,
+    _element_type: &DataType,
     element_writer: &mut ColumnWriter,
     list_builder: &mut ListBuilder<Box<dyn ArrayBuilder>>,
 ) -> Result<()> {
     // Write each element of the FlussArray
     for i in 0..array.size() {
         if array.is_null_at(i) {
-            // Append null to the element builder
+            element_writer.append_null();
             append_null_to_builder(list_builder.values());
         } else {
-            // Create a temporary row that wraps the array element and write it
             let element_row = ArrayElementRow::new(array.clone(), i);
-            element_writer.write_field(&element_row)?;
+            element_writer.write_field(&element_row``)?;
+            append_null_to_builder(list_builder.values());
         }
     }
     Ok(())
@@ -958,36 +958,43 @@ fn write_fluss_array_to_list_builder(
 
 /// Helper function to append null to a boxed ArrayBuilder.
 fn append_null_to_builder(builder: &mut dyn ArrayBuilder) {
-    // This is a workaround since we can't directly call append_null on dyn ArrayBuilder
-    // We use Any to try to downcast to known builder types
     use arrow::array::*;
-    use std::any::Any;
 
-    if let Some(b) = builder.as_any_mut().downcast_mut::<BooleanBuilder>() {
-        b.append_null();
-    } else if let Some(b) = builder.as_any_mut().downcast_mut::<Int8Builder>() {
-        b.append_null();
-    } else if let Some(b) = builder.as_any_mut().downcast_mut::<Int16Builder>() {
-        b.append_null();
-    } else if let Some(b) = builder.as_any_mut().downcast_mut::<Int32Builder>() {
-        b.append_null();
-    } else if let Some(b) = builder.as_any_mut().downcast_mut::<Int64Builder>() {
-        b.append_null();
-    } else if let Some(b) = builder.as_any_mut().downcast_mut::<Float32Builder>() {
-        b.append_null();
-    } else if let Some(b) = builder.as_any_mut().downcast_mut::<Float64Builder>() {
-        b.append_null();
-    } else if let Some(b) = builder.as_any_mut().downcast_mut::<StringBuilder>() {
-        b.append_null();
-    } else if let Some(b) = builder.as_any_mut().downcast_mut::<BinaryBuilder>() {
-        b.append_null();
-    } else if let Some(b) = builder.as_any_mut().downcast_mut::<Date32Builder>() {
-        b.append_null();
-    } else {
-        // For complex types, try to use the builder's finish_cloned and ignore result
-        // This is not ideal but works for our use case
-        let _ = builder.finish_cloned();
+    macro_rules! downcast_append_null {
+        ($($ty:ty),+) => {
+            $(
+                if let Some(b) = builder.as_any_mut().downcast_mut::<$ty>() {
+                    b.append_null();
+                    return;
+                }
+            )+
+        };
     }
+
+    downcast_append_null!(
+        BooleanBuilder,
+        Int8Builder,
+        Int16Builder,
+        Int32Builder,
+        Int64Builder,
+        Float32Builder,
+        Float64Builder,
+        StringBuilder,
+        BinaryBuilder,
+        FixedSizeBinaryBuilder,
+        Date32Builder,
+        Time32SecondBuilder,
+        Time32MillisecondBuilder,
+        Time64MicrosecondBuilder,
+        Time64NanosecondBuilder,
+        TimestampSecondBuilder,
+        TimestampMillisecondBuilder,
+        TimestampMicrosecondBuilder,
+        TimestampNanosecondBuilder,
+        Decimal128Builder,
+        StructBuilder,
+        ListBuilder<Box<dyn ArrayBuilder>>
+    );
 }
 
 /// Write a FlussArray (representing a Row) to a StructBuilder.
@@ -997,8 +1004,6 @@ fn write_fluss_array_to_struct_builder(
     _arrow_fields: &arrow_schema::Fields,
     struct_builder: &mut StructBuilder,
 ) -> Result<()> {
-    use arrow::array::*;
-
     // We need to write each field of the row to the corresponding field builder
     // For each field, we downcast to the specific builder type based on the DataType
     for (idx, field_type) in fields.iter().enumerate() {
@@ -1073,40 +1078,6 @@ fn write_field_to_struct_builder(
     struct_builder: &mut StructBuilder,
 ) -> Result<()> {
     use arrow::array::*;
-
-    macro_rules! write_primitive {
-        ($builder_type:ty, $get_method:ident, $value_type:ty) => {
-            if let Some(b) = struct_builder.field_builder::<$builder_type>(idx) {
-                let value: $value_type = row_array.$get_method(idx)?;
-                b.append_value(value);
-                return Ok(());
-            }
-        };
-    }
-
-    macro_rules! write_decimal {
-        () => {
-            if let Some(b) = struct_builder.field_builder::<Decimal128Builder>(idx) {
-                let decimal_type = match field_type {
-                    DataType::Decimal(dt) => dt,
-                    _ => {
-                        return Err(Error::IllegalArgument {
-                            message: "Expected Decimal type".to_string(),
-                        });
-                    }
-                };
-                let decimal =
-                    row_array.get_decimal(idx, decimal_type.precision(), decimal_type.scale())?;
-                append_decimal_to_builder(
-                    &decimal,
-                    decimal_type.precision() as u32,
-                    decimal_type.scale() as i64,
-                    b,
-                )?;
-                return Ok(());
-            }
-        };
-    }
 
     // Helper macro to write primitive types
     macro_rules! try_write_primitive {
